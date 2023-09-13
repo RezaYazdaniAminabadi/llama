@@ -19,6 +19,7 @@ from fairscale.nn.model_parallel.initialize import (
 from llama.model import ModelArgs, Transformer
 from llama.tokenizer import Tokenizer
 
+import deepspeed
 Role = Literal["system", "user", "assistant"]
 
 
@@ -56,6 +57,7 @@ class Llama:
         max_seq_len: int,
         max_batch_size: int,
         model_parallel_size: Optional[int] = None,
+        use_deepspeed_inference: bool = False
     ) -> "Llama":
         """
         Build a Llama instance by initializing and loading a pre-trained model.
@@ -115,8 +117,16 @@ class Llama:
         tokenizer = Tokenizer(model_path=tokenizer_path)
         model_args.vocab_size = tokenizer.n_words
         torch.set_default_tensor_type(torch.cuda.HalfTensor)
+
         model = Transformer(model_args)
         model.load_state_dict(checkpoint, strict=False)
+        if use_deepspeed_inference:
+            deepspeed.init_inference(model, 
+                                    replace_with_kernel_inject=True, 
+                                    dtype=torch.half, 
+                                    return_tuple=False, 
+                                    mp_size=torch.distributed.get_world_size(),
+                                    )
         print(f"Loaded in {time.time() - start_time:.2f} seconds")
 
         return Llama(model, tokenizer)

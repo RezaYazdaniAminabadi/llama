@@ -2,9 +2,12 @@
 # This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
 
 import fire
-
+import torch
+import time 
 from llama import Llama
 from typing import List
+
+import deepspeed
 
 def main(
     ckpt_dir: str,
@@ -14,6 +17,8 @@ def main(
     max_seq_len: int = 128,
     max_gen_len: int = 64,
     max_batch_size: int = 4,
+    test_for_performance: bool = False,
+    use_deepspeed_inference: bool = False,
 ):
     """
     Entry point of the program for generating text using a pretrained model.
@@ -34,6 +39,7 @@ def main(
         tokenizer_path=tokenizer_path,
         max_seq_len=max_seq_len,
         max_batch_size=max_batch_size,
+        use_deepspeed_inference=use_deepspeed_inference
     )
 
     prompts: List[str] = [
@@ -53,17 +59,70 @@ def main(
         plush girafe => girafe peluche
         cheese =>""",
     ]
-    results = generator.text_completion(
-        prompts,
-        max_gen_len=max_gen_len,
-        temperature=temperature,
-        top_p=top_p,
-    )
-    for prompt, result in zip(prompts, results):
-        print(prompt)
-        print(f"> {result['generation']}")
-        print("\n==================================\n")
-
+    if test_for_performance:
+        # warmup
+        for _ in range(3):
+            results = generator.text_completion(
+                prompts,
+                max_gen_len=max_gen_len,
+                temperature=temperature,
+                top_p=top_p,
+            )
+        torch.cuda.synchronize()
+        t0 = time.time()
+        for _ in range(10):
+            results = generator.text_completion(
+                prompts,
+                max_gen_len=max_gen_len,
+                temperature=temperature,
+                top_p=top_p,
+            )
+        torch.cuda.synchronize()
+        t1 = time.time()
+        baseline_time = t1 - t0
+        
+        deepspeed.init_inference(generator.model, 
+                                replace_with_kernel_inject=True, 
+                                dtype=torch.half, 
+                                return_tuple=False, 
+                                mp_size=torch.distributed.get_world_size(),
+                                )
+        # warmup
+        for _ in range(3):
+            results = generator.text_completion(
+                prompts,
+                max_gen_len=max_gen_len,
+                temperature=temperature,
+                top_p=top_p,
+            )
+        torch.cuda.synchronize()
+        t0 = time.time()
+        for _ in range(10):
+            results = generator.text_completion(
+                prompts,
+                max_gen_len=max_gen_len,
+                temperature=temperature,
+                top_p=top_p,
+            )
+        torch.cuda.synchronize()
+        t1 = time.time()
+        ds_time = t1 - t0
+        print(f'baseline: generation time {baseline_time / 10:.3f} sec for generating x tokens.')
+        print(f'ds-inference: generation time {ds_time / 10:.3f} sec for generating x tokens.')
+        print(f'speeup: {baseline_time / ds_time:.3f}x')
+    else:
+        for _ in range(1):
+            results = generator.text_completion(
+                prompts,
+                max_gen_len=max_gen_len,
+                temperature=temperature,
+                top_p=top_p,
+            )
+        for prompt, result in zip(prompts, results):
+            print(prompt)
+            print(f"> {result['generation']}")
+            print("\n==================================\n")
+    exit()
 
 if __name__ == "__main__":
     fire.Fire(main)
