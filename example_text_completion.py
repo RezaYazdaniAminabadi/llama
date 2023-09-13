@@ -19,6 +19,7 @@ def main(
     max_batch_size: int = 4,
     test_for_performance: bool = False,
     use_deepspeed_inference: bool = False,
+    checkpoint_device: str = 'cpu'
 ):
     """
     Entry point of the program for generating text using a pretrained model.
@@ -39,7 +40,8 @@ def main(
         tokenizer_path=tokenizer_path,
         max_seq_len=max_seq_len,
         max_batch_size=max_batch_size,
-        use_deepspeed_inference=use_deepspeed_inference
+        use_deepspeed_inference=use_deepspeed_inference,
+        checkpoint_device=f'cuda:{torch.distributed.get_rank()}' if checkpoint_device == 'cuda' else 'cpu'
     )
 
     prompts: List[str] = [

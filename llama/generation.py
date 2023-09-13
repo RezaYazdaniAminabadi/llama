@@ -57,7 +57,8 @@ class Llama:
         max_seq_len: int,
         max_batch_size: int,
         model_parallel_size: Optional[int] = None,
-        use_deepspeed_inference: bool = False
+        use_deepspeed_inference: bool = False,
+        checkpoint_device: str = 'cpu'
     ) -> "Llama":
         """
         Build a Llama instance by initializing and loading a pre-trained model.
@@ -105,7 +106,7 @@ class Llama:
             checkpoints
         ), f"Loading a checkpoint for MP={len(checkpoints)} but world size is {model_parallel_size}"
         ckpt_path = checkpoints[get_model_parallel_rank()]
-        checkpoint = torch.load(ckpt_path, map_location="cpu")
+        checkpoint = torch.load(ckpt_path, map_location=checkpoint_device)
         with open(Path(ckpt_dir) / "params.json", "r") as f:
             params = json.loads(f.read())
 
