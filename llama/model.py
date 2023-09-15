@@ -411,7 +411,7 @@ class TransformerBlock(nn.Module):
 
 
 class Transformer(nn.Module):
-    def __init__(self, params: ModelArgs):
+    def __init__(self, params: ModelArgs, use_cpu_initialization):
         """
         Initialize a Transformer model.
 
@@ -440,7 +440,9 @@ class Transformer(nn.Module):
 
         self.layers = torch.nn.ModuleList()
         for layer_id in range(params.n_layers):
-            self.layers.append(TransformerBlock(layer_id, params))
+            layer = TransformerBlock(layer_id, params).cpu() if use_cpu_initialization else \
+                    TransformerBlock(layer_id, params)
+            self.layers.append(layer)
 
         self.norm = RMSNorm(params.dim, eps=params.norm_eps)
         self.output = ColumnParallelLinear(

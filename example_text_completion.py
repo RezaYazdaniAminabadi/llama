@@ -41,7 +41,7 @@ def main(
         max_seq_len=max_seq_len,
         max_batch_size=max_batch_size,
         use_deepspeed_inference=use_deepspeed_inference,
-        checkpoint_device=f'cuda:{torch.distributed.get_rank()}' if checkpoint_device == 'cuda' else 'cpu'
+        checkpoint_device=checkpoint_device
     )
 
     prompts: List[str] = [
@@ -82,7 +82,7 @@ def main(
         torch.cuda.synchronize()
         t1 = time.time()
         baseline_time = t1 - t0
-        
+        generator.model = generator.model.cpu()
         deepspeed.init_inference(generator.model, 
                                 replace_with_kernel_inject=True, 
                                 dtype=torch.half, 

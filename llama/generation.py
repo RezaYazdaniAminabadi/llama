@@ -48,7 +48,7 @@ B_SYS, E_SYS = "<<SYS>>\n", "\n<</SYS>>\n\n"
 SPECIAL_TAGS = [B_INST, E_INST, "<<SYS>>", "<</SYS>>"]
 UNSAFE_ERROR = "Error: special tags are not allowed as part of the prompt."
 
-
+from .utils import merge_checkpints
 class Llama:
     @staticmethod
     def build(
@@ -57,8 +57,9 @@ class Llama:
         max_seq_len: int,
         max_batch_size: int,
         model_parallel_size: Optional[int] = None,
+        use_cpu_initialization: bool = True,
         use_deepspeed_inference: bool = False,
-        checkpoint_device: str = 'cpu'
+        checkpoint_device: str = 'cpu',
     ) -> "Llama":
         """
         Build a Llama instance by initializing and loading a pre-trained model.
@@ -83,6 +84,18 @@ class Llama:
             and loads the pre-trained model and tokenizer.
 
         """
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        if local_rank == 0:
+            print(f'''\n------------- Llama-V2 text-generation Config -------------       \
+                \nckpt_dir -------------------------------- {ckpt_dir}                    \
+                \ntokenizer_path -------------------------- {tokenizer_path}              \
+                \nmax_seq_len ----------------------------- {max_seq_len}                 \
+                \nmax_batch_size -------------------------- {max_batch_size}              \
+                \nmodel_parallel_size --------------------- {model_parallel_size}         \
+                \nuse_deepspeed_inference ----------------- {use_deepspeed_inference}     \
+                \ncheckpoint_device ----------------------- {checkpoint_device}           \
+                \nuse_cpu_initialization ------------------ {use_cpu_initialization}      \
+            ''')
         if not torch.distributed.is_initialized():
             torch.distributed.init_process_group("nccl")
         if not model_parallel_is_initialized():
@@ -90,7 +103,6 @@ class Llama:
                 model_parallel_size = int(os.environ.get("WORLD_SIZE", 1))
             initialize_model_parallel(model_parallel_size)
 
-        local_rank = int(os.environ.get("LOCAL_RANK", 0))
         torch.cuda.set_device(local_rank)
 
         # seed must be the same in all processes
@@ -102,11 +114,15 @@ class Llama:
         start_time = time.time()
         checkpoints = sorted(Path(ckpt_dir).glob("*.pth"))
         assert len(checkpoints) > 0, f"no checkpoint files found in {ckpt_dir}"
-        assert model_parallel_size == len(
-            checkpoints
-        ), f"Loading a checkpoint for MP={len(checkpoints)} but world size is {model_parallel_size}"
-        ckpt_path = checkpoints[get_model_parallel_rank()]
-        checkpoint = torch.load(ckpt_path, map_location=checkpoint_device)
+        if model_parallel_size == len(checkpoints):
+            ckpt_path = checkpoints[get_model_parallel_rank()]
+            checkpoint = torch.load(ckpt_path, map_location=checkpoint_device if checkpoint_device == 'cpu' else f'cuda:{torch.distributed.get_rank()}')
+        else:
+            rank = get_model_parallel_rank()
+            stride = len(checkpoints) // model_parallel_size
+            ckpt_path = [checkpoints[rank * stride + i] for i in range(stride)]
+            checkpoint = [torch.load(cp, map_location='cpu') for cp in ckpt_path]
+            checkpoint = merge_checkpints(checkpoint)
         with open(Path(ckpt_dir) / "params.json", "r") as f:
             params = json.loads(f.read())
 
@@ -118,15 +134,19 @@ class Llama:
         tokenizer = Tokenizer(model_path=tokenizer_path)
         model_args.vocab_size = tokenizer.n_words
         torch.set_default_tensor_type(torch.cuda.HalfTensor)
-
-        model = Transformer(model_args)
+        #with deepspeed.OnDevice(dtype=torch.half, device="meta"):
+        model = Transformer(model_args, use_cpu_initialization=use_cpu_initialization)
         model.load_state_dict(checkpoint, strict=False)
         if use_deepspeed_inference:
+            if use_cpu_initialization:
+                model = model.cpu()
             deepspeed.init_inference(model, 
                                     replace_with_kernel_inject=True, 
-                                    dtype=torch.half, 
+                                    dtype=torch.int8, 
                                     return_tuple=False, 
                                     mp_size=torch.distributed.get_world_size(),
+                                    max_out_tokens=256
+                                    #checkpoint='checkpoint.json'
                                     )
         print(f"Loaded in {time.time() - start_time:.2f} seconds")
 
