@@ -7,19 +7,21 @@ import time
 from llama import Llama
 from typing import List
 
-import deepspeed
+from ds_inference_util import inject_ds_inference_module
 
 def main(
     ckpt_dir: str,
     tokenizer_path: str,
     temperature: float = 0.6,
     top_p: float = 0.9,
-    max_seq_len: int = 128,
-    max_gen_len: int = 64,
+    max_seq_len: int = 256,
+    max_gen_len: int = 128,
     max_batch_size: int = 4,
     test_for_performance: bool = False,
     use_deepspeed_inference: bool = False,
-    checkpoint_device: str = 'cpu'
+    checkpoint_device: str = 'cpu',
+    use_cpu_initialization: bool = False,
+    enable_quantization: bool = False,
 ):
     """
     Entry point of the program for generating text using a pretrained model.
@@ -41,7 +43,8 @@ def main(
         max_seq_len=max_seq_len,
         max_batch_size=max_batch_size,
         use_deepspeed_inference=use_deepspeed_inference,
-        checkpoint_device=checkpoint_device
+        checkpoint_device=checkpoint_device,
+        use_cpu_initialization=use_cpu_initialization
     )
 
     prompts: List[str] = [
@@ -70,25 +73,27 @@ def main(
                 temperature=temperature,
                 top_p=top_p,
             )
+        num_tokens = 0
         torch.cuda.synchronize()
         t0 = time.time()
         for _ in range(10):
-            results = generator.text_completion(
+            results, nt = generator.text_completion(
                 prompts,
                 max_gen_len=max_gen_len,
                 temperature=temperature,
                 top_p=top_p,
             )
+            num_tokens += nt
         torch.cuda.synchronize()
         t1 = time.time()
         baseline_time = t1 - t0
-        generator.model = generator.model.cpu()
-        deepspeed.init_inference(generator.model, 
-                                replace_with_kernel_inject=True, 
-                                dtype=torch.half, 
-                                return_tuple=False, 
-                                mp_size=torch.distributed.get_world_size(),
-                                )
+        if use_cpu_initialization:
+            generator.model = generator.model.cpu()
+        # inject only if the deepspeed inference is not enabled previously
+        if not use_deepspeed_inference:
+            inject_ds_inference_module(generator.model, 
+                                       enable_quantization, 
+                                       max_out_tokens=max_seq_len)
         # warmup
         for _ in range(3):
             results = generator.text_completion(
@@ -97,24 +102,26 @@ def main(
                 temperature=temperature,
                 top_p=top_p,
             )
+        num_tokens1 = 0
         torch.cuda.synchronize()
         t0 = time.time()
         for _ in range(10):
-            results = generator.text_completion(
+            results, nt = generator.text_completion(
                 prompts,
                 max_gen_len=max_gen_len,
                 temperature=temperature,
                 top_p=top_p,
             )
+            num_tokens1 += nt
         torch.cuda.synchronize()
         t1 = time.time()
         ds_time = t1 - t0
-        print(f'baseline: generation time {baseline_time / 10:.3f} sec for generating x tokens.')
-        print(f'ds-inference: generation time {ds_time / 10:.3f} sec for generating x tokens.')
+        print(f'baseline: total time - {baseline_time} ({num_tokens}) - token generation time {baseline_time / num_tokens:.3f}, tok/sec: {4 / (baseline_time / num_tokens)}.')
+        print(f'ds-inference: total time - {ds_time} ({num_tokens}) - token generation time {ds_time / num_tokens1:.3f}, tok/sec: {4 / (ds_time / num_tokens1)}.')
         print(f'speeup: {baseline_time / ds_time:.3f}x')
     else:
         for _ in range(1):
-            results = generator.text_completion(
+            results, _ = generator.text_completion(
                 prompts,
                 max_gen_len=max_gen_len,
                 temperature=temperature,

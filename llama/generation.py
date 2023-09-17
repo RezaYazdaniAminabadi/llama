@@ -19,7 +19,9 @@ from fairscale.nn.model_parallel.initialize import (
 from llama.model import ModelArgs, Transformer
 from llama.tokenizer import Tokenizer
 
-import deepspeed
+
+from ds_inference_util import inject_ds_inference_module
+
 Role = Literal["system", "user", "assistant"]
 
 
@@ -57,7 +59,7 @@ class Llama:
         max_seq_len: int,
         max_batch_size: int,
         model_parallel_size: Optional[int] = None,
-        use_cpu_initialization: bool = True,
+        use_cpu_initialization: bool = False,
         use_deepspeed_inference: bool = False,
         checkpoint_device: str = 'cpu',
     ) -> "Llama":
@@ -134,20 +136,13 @@ class Llama:
         tokenizer = Tokenizer(model_path=tokenizer_path)
         model_args.vocab_size = tokenizer.n_words
         torch.set_default_tensor_type(torch.cuda.HalfTensor)
-        #with deepspeed.OnDevice(dtype=torch.half, device="meta"):
+
         model = Transformer(model_args, use_cpu_initialization=use_cpu_initialization)
         model.load_state_dict(checkpoint, strict=False)
-        if use_deepspeed_inference:
-            if use_cpu_initialization:
-                model = model.cpu()
-            deepspeed.init_inference(model, 
-                                    replace_with_kernel_inject=True, 
-                                    dtype=torch.int8, 
-                                    return_tuple=False, 
-                                    mp_size=torch.distributed.get_world_size(),
-                                    max_out_tokens=256
-                                    #checkpoint='checkpoint.json'
-                                    )
+        if use_deepspeed_inference:            
+            inject_ds_inference_module(generator.model, 
+                                       enable_quantization, 
+                                       max_out_tokens=max_seq_len,)
         print(f"Loaded in {time.time() - start_time:.2f} seconds")
 
         return Llama(model, tokenizer)
@@ -212,7 +207,7 @@ class Llama:
                 reduction="none",
                 ignore_index=pad_id,
             )
-
+        num_tokens = 0
         for cur_pos in range(min_prompt_len, total_len):
             logits = self.model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
             if temperature > 0:
@@ -238,6 +233,7 @@ class Llama:
                 next_token == self.tokenizer.eos_id
             )
             prev_pos = cur_pos
+            num_tokens += 1
             if all(eos_reached):
                 break
 
@@ -258,7 +254,7 @@ class Llama:
                 probs = probs[:eos_idx] if logprobs else None
             out_tokens.append(toks)
             out_logprobs.append(probs)
-        return (out_tokens, out_logprobs if logprobs else None)
+        return (out_tokens, out_logprobs if logprobs else None, num_tokens)
 
     def text_completion(
         self,
@@ -292,7 +288,7 @@ class Llama:
         if max_gen_len is None:
             max_gen_len = self.model.params.max_seq_len - 1
         prompt_tokens = [self.tokenizer.encode(x, bos=True, eos=False) for x in prompts]
-        generation_tokens, generation_logprobs = self.generate(
+        generation_tokens, generation_logprobs, num_tokens = self.generate(
             prompt_tokens=prompt_tokens,
             max_gen_len=max_gen_len,
             temperature=temperature,
@@ -305,11 +301,16 @@ class Llama:
                 {
                     "generation": self.tokenizer.decode(t),
                     "tokens": [self.tokenizer.decode(x) for x in t],
-                    "logprobs": logprobs_i,
+                    "logprobs": logprobs_i
                 }
                 for t, logprobs_i in zip(generation_tokens, generation_logprobs)
-            ]
-        return [{"generation": self.tokenizer.decode(t)} for t in generation_tokens]
+            ], num_tokens
+        return [
+                {
+                    "generation": self.tokenizer.decode(t),
+                }
+                for t in generation_tokens
+            ], num_tokens
 
     def chat_completion(
         self,

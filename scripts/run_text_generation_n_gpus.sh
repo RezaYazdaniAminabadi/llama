@@ -6,7 +6,6 @@ TOKENIZER_PATH=$3
 deepspeed --num_nodes 1 --num_gpus $NUM_GPUS example_text_completion.py \
     --ckpt_dir=$MODEL_PATH \
     --tokenizer_path=$TOKENIZER_PATH \
-    --checkpoint_device='cpu' \
-    --use_cpu_initialization=true \
+    --checkpoint_device='cuda' \
     --use_deepspeed_inference=true \
     #--test_for_performance=true \
